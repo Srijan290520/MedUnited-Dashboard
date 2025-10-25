@@ -1,0 +1,5 @@
+{
+  "name": "MedUnited Hospitals - Care Dashboard",
+  "description": "A dashboard for MedUnited Hospitals' customer care team to manage outbound patient feedback calls and inbound support requests from internal staff and students.",
+  "requestFramePermissions": []
+}

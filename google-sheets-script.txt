@@ -1,0 +1,187 @@
+
+/**
+ * MedUnited Hospitals - Google Apps Script Backend
+ *
+ * --- HOW TO USE ---
+ * 1. Open your Google Sheet that contains the patient data.
+ * 2. In the bottom tab bar, ensure the sheet containing your data is named EXACTLY "PatientData". It is case-sensitive.
+ * 3. Go to Extensions > Apps Script.
+ * 4. Copy and paste this entire script into the editor, replacing all existing code.
+ * 5. Save the project (File > Save).
+ * 6. DEPLOY THE SCRIPT (This is a critical step):
+ *    a. Click the "Deploy" button in the top right, then select "New deployment".
+ *    b. For "Select type" (the gear icon), choose "Web app".
+ *    c. In the "Configuration" section:
+ *       - Description: "MedUnited Patient Data API"
+ *       - Execute as: "Me (your@email.com)"
+ *       - Who has access: "Anyone" (This is required for the application to access it without user login).
+ *    d. Click "Deploy".
+ *    e. If asked, click "Authorize access". Choose your Google account, click "Advanced", and proceed to allow the permissions.
+ * 7. After deploying, copy the new "Web app URL". This is your API endpoint. You MUST use this new URL in your frontend application.
+ *
+ * Your sheet must have the following columns in this exact order:
+ * patientId, patientName, doctorName, lastVisitDate, department, patientType, callOutcome, agentName, callDate, notes
+ */
+
+// --- CONFIGURATION ---
+// This MUST match the name of the tab in your Google Sheet.
+const SHEET_NAME = "PatientData"; 
+
+/**
+ * Handles HTTP GET requests to fetch paginated patient data.
+ */
+function doGet(e) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      // This error means the SHEET_NAME variable above does not match any tab in your Google Sheet.
+      return createJsonResponse({ error: `Sheet "${SHEET_NAME}" not found.` });
+    }
+
+    const page = parseInt(e.parameter.page, 10) || 1;
+    const limit = parseInt(e.parameter.limit, 10) || 50;
+    
+    const dataRange = sheet.getDataRange();
+    const allData = dataRange.getValues();
+    const headers = allData.shift() || []; // Remove header row
+
+    const totalRecords = allData.length;
+    if (totalRecords === 0) {
+      return createJsonResponse({ records: [], totalPages: 0, totalRecords: 0, currentPage: 1 });
+    }
+      
+    const totalPages = Math.ceil(totalRecords / limit);
+    const startIndex = (page - 1) * limit;
+    const paginatedData = allData.slice(startIndex, startIndex + limit);
+
+    const records = paginatedData.map((row, index) => {
+      return mapRowToObject(row, startIndex + index + 2);
+    });
+
+    return createJsonResponse({ records, totalPages, totalRecords, currentPage: page });
+
+  } catch (error) {
+    Logger.log(error);
+    return createJsonResponse({ error: "An error occurred while fetching data.", details: error.message }, 500);
+  }
+}
+
+/**
+ * Handles HTTP POST requests to update or append records.
+ * The request body must be a JSON string with an `action` property ('update' or 'append').
+ */
+function doPost(e) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      return createJsonResponse({ error: `Sheet "${SHEET_NAME}" not found.` });
+    }
+
+    const payload = JSON.parse(e.postData.contents);
+
+    if (payload.action === 'update') {
+      const updatedPatient = payload.data;
+      const rowNumber = updatedPatient.rowNumber;
+
+      if (!rowNumber || rowNumber < 2) {
+        return createJsonResponse({ error: "Invalid or missing 'rowNumber'. Must be 2 or greater." }, 400);
+      }
+
+      const rowData = mapObjectToRow(updatedPatient);
+      // Assumes 10 columns based on the mapObjectToRow function
+      const rangeToUpdate = sheet.getRange(rowNumber, 1, 1, 10);
+      rangeToUpdate.setValues([rowData]);
+      return createJsonResponse({ success: true, message: `Record in row ${rowNumber} updated successfully.` });
+
+    } else if (payload.action === 'append') {
+      const recordsToAppend = payload.data;
+      if (!Array.isArray(recordsToAppend) || recordsToAppend.length === 0) {
+        return createJsonResponse({ error: "No records to append." }, 400);
+      }
+      
+      const rowsToAppend = recordsToAppend.map(mapObjectToRow);
+      // Append rows to the end of the sheet
+      sheet.getRange(sheet.getLastRow() + 1, 1, rowsToAppend.length, rowsToAppend[0].length).setValues(rowsToAppend);
+      return createJsonResponse({ success: true, message: `${recordsToAppend.length} records appended successfully.` });
+
+    } else {
+      return createJsonResponse({ error: "Invalid or missing 'action' in request body." }, 400);
+    }
+
+  } catch (error) {
+    Logger.log(error);
+    return createJsonResponse({ error: "Failed to process request.", details: error.message }, 500);
+  }
+}
+
+// --- HELPER FUNCTIONS ---
+
+function createJsonResponse(data) {
+  const output = ContentService.createTextOutput(JSON.stringify(data));
+  output.setMimeType(ContentService.MimeType.JSON);
+  return output;
+}
+
+function cleanValue(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  let cleaned = value.trim();
+  // Remove matching surrounding quotes.
+  if (cleaned.length >= 2 && cleaned.startsWith('"') && cleaned.endsWith('"')) {
+    cleaned = cleaned.substring(1, cleaned.length - 1).trim();
+  }
+  // Un-escape double quotes used in CSV format e.g. "some""value" -> some"value
+  return cleaned.replace(/""/g, '"');
+}
+
+function mapRowToObject(row, rowNumber) {
+  return {
+    id: `${row[0]}-${rowNumber}`,
+    rowNumber: rowNumber,
+    patientId: cleanValue(row[0]),
+    patientName: cleanValue(row[1]),
+    doctorName: cleanValue(row[2]),
+    lastVisitDate: formatDate(row[3]),
+    department: cleanValue(row[4]),
+    patientType: cleanValue(row[5]),
+    callOutcome: cleanValue(row[6]),
+    agentName: cleanValue(row[7]),
+    callDate: formatDate(row[8]),
+    notes: cleanValue(row[9]),
+  };
+}
+
+function mapObjectToRow(patientObject) {
+  return [
+    patientObject.patientId || '',
+    patientObject.patientName || '',
+    patientObject.doctorName || '',
+    patientObject.lastVisitDate || null,
+    patientObject.department || '',
+    patientObject.patientType || '',
+    patientObject.callOutcome || '',
+    patientObject.agentName || '',
+    patientObject.callDate || null,
+    patientObject.notes || ''
+  ];
+}
+
+function formatDate(dateInput) {
+  if (!dateInput) return null;
+  try {
+    const date = new Date(dateInput);
+    if (isNaN(date.getTime())) {
+      // If it's not a valid date, return null. This handles empty strings or malformed dates.
+      return null;
+    }
+    // Format the date to 'yyyy-MM-dd' in the script's/spreadsheet's timezone to avoid UTC conversion issues.
+    // This ensures that the date sent to the client is the same as the one in the sheet.
+    const spreadsheetTimezone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+    return Utilities.formatDate(date, spreadsheetTimezone, 'yyyy-MM-dd');
+  } catch (e) {
+    // Log the error for debugging but return null for the client.
+    Logger.log("Error formatting date: " + dateInput + ". Error: " + e.message);
+    return null;
+  }
+}
